@@ -4,6 +4,7 @@
   "description": "Streamchime SDK for TikTok LIVE. Not affiliated with TikTok.",
   "license": "MIT",
   "type": "module",
+  "sideEffects": false,
   "engines": {
     "node": ">=20"
   },

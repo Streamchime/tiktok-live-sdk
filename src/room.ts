@@ -27,11 +27,20 @@ export type TikTokRoomOptions = StreamchimeClientOptions;
 /** Maps one envelope to the TikTokRoom event name it is delivered as. The schema's fourteen
  * EventType values (schema/event.v1.schema.json) do not include "join" or "pk" on their own:
  * TikTok's own room-join and PK-battle moments arrive as type "raw" with a subtype, so this reads
- * subtype for those two. See FLAG in the completion note: the exact subtype spelling TikTok's own
- * room sends for a join or a PK battle is not yet confirmed against a live room (Task 15's harness
- * and the 72 hour hold are what will observe it); "join" and "pk" are matched case-insensitively
- * against the token this build guesses, and anything else typed raw, including an unmatched
- * subtype, still reaches a listener as "raw" rather than being dropped. */
+ * subtype for those two.
+ *
+ * "join" matches the literal subtype the mapper emits (confirmed against
+ * streamchime-api/src/Streamchime.Rooms/Mapping/TikTokMapper.cs's MapMember, "join" with no
+ * variant spelling). PK is three subtypes, not one, matching MapBattle and MapArmies exactly:
+ * "pk_start" and "pk_end" (MapBattle, chosen by whether the battle carries a result yet) and
+ * "pk_score" (MapArmies, a running score update mid-battle). All three are routed to the single
+ * "pk" event, matching Shared names' own TikTokRoom event list (one "pk" name, not three); the
+ * envelope's own "subtype" field is left untouched on the delivered event, so a listener that
+ * cares which PK moment this is reads event.subtype ("pk_start" | "pk_score" | "pk_end") as the
+ * phase, rather than the SDK inventing a second, redundant field for information the envelope
+ * already carries. The alternative (three separate events, pkStart/pkScore/pkEnd) was rejected:
+ * it would grow TikTokRoom's public event surface beyond what Shared names names, for a
+ * distinction the envelope's subtype already makes without any extra API. */
 export function mapEventName(envelope: Pick<StreamchimeEvent, "type" | "subtype" | "payload">): TikTokRoomEventName {
   switch (envelope.type) {
     case "message":
@@ -54,10 +63,10 @@ export function mapEventName(envelope: Pick<StreamchimeEvent, "type" | "subtype"
     }
     case "raw": {
       const subtype = (envelope.subtype ?? "").toLowerCase();
-      if (subtype === "join" || subtype === "member") {
+      if (subtype === "join") {
         return "join";
       }
-      if (subtype === "pk" || subtype === "pk_battle") {
+      if (subtype === "pk_start" || subtype === "pk_score" || subtype === "pk_end") {
         return "pk";
       }
       return "raw";
@@ -96,6 +105,17 @@ export class TikTokRoom extends TypedEmitter<TikTokRoomEventMap> {
   // "subscribed" itself, a tick before an awaited promise's continuation would run. Matched on
   // handle rather than channel id, since that is the one thing both this room and the subscribed
   // frame already agree on before the channel id is known.
+  //
+  // This closes only the client-side ordering hazard (an awaited microtask losing a race to a
+  // synchronously handled later message). It does not close a server-side ordering hazard review
+  // task-14-review.md's S3 found: HandleAppSubscribeAsync's own AttachAsync call (which can start
+  // delivering a live event) is not wrapped in HoldChannel/ReleaseChannel the way the identify-time
+  // and reconnect-replay attach paths both are, so on a hot room the very first live event can be
+  // written to the wire before the subscribed frame itself is. When that happens this event still
+  // arrives first in wire order and is dropped by onEvent below (channelId still null), and no
+  // client-side fix can close that without buffering by handle across an unknown channel id, or a
+  // server-side fix wrapping that one attach call the same way the other two already are. Tracked
+  // as a cross-task flag for Task 6b's own fix round, not reworked here.
   private readonly onSubscribed = (payload: GatewaySubscribedPayload): void => {
     if (payload.handle !== this.handle) {
       return;

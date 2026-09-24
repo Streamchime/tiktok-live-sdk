@@ -96,12 +96,17 @@ Each event a room receives is mapped, by its type and, for a raw event, its subt
 | `viewerCount` | a viewer count update |
 | `streamStart` | the room going live |
 | `streamEnd` | the room ending |
-| `pk` | a PK battle moment |
+| `pk` | a PK battle moment (three phases; see below) |
 | `raw` | anything not mapped to one of the above |
 
 Every listener receives the full event envelope (`event.type`, `event.payload`,
 `event.actor`, and so on; see `schema/event.v1.schema.json` and the generated types in
 `src/types.ts`).
+
+`pk` fires for three different moments of a PK battle, told apart by `event.subtype`, the phase:
+`"pk_start"`, `"pk_score"` (a running score update mid-battle) or `"pk_end"`. There is one `pk`
+event, not three, so `room.on("pk", (event) => { ... })` sees every phase; check `event.subtype`
+inside the listener for the phase.
 
 ## REST helpers
 

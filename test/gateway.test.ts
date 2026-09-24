@@ -179,14 +179,96 @@ describe("subscribe", () => {
 
     await expect(client.unsubscribe("ch_gone")).rejects.toBeInstanceOf(StreamchimeProblemError);
   });
+
+  it("serializes two subscribe calls fired without awaiting the first, correlating each to its own answer", async () => {
+    const receivedOrder: string[] = [];
+    const server = await startFakeGateway(async (socket, gw) => {
+      await gw.nextMessage(socket); // identify
+      send(socket, sampleReady());
+
+      const first = await gw.nextMessage(socket);
+      receivedOrder.push(first.handle);
+      expect(first).toEqual({ op: "subscribe", platform: "tiktok", handle: "first" });
+      send(socket, { op: "subscribed", channel_id: "ch_first", handle: "first", status: "connecting", seq: 0 });
+
+      // Only sent by the client once the first call above has been answered: this is the
+      // property under test, not something this handler forces.
+      const second = await gw.nextMessage(socket);
+      receivedOrder.push(second.handle);
+      expect(second).toEqual({ op: "subscribe", platform: "tiktok", handle: "second" });
+      send(socket, { op: "problem", title: "room_cap_exceeded", detail: "This app has reached the room cap for its tier.", channel_id: null });
+    });
+    servers.push(server);
+
+    const client = new StreamchimeClient({ apiKey: "sc_sk_test_key", gatewayUrl: server.url });
+    clients.push(client);
+    await client.connect();
+
+    // Fired back to back; neither is awaited before the next call starts (review
+    // task-14-review.md M3).
+    const firstCall = client.subscribeTikTok("first");
+    const secondCall = client.subscribeTikTok("second");
+
+    await expect(firstCall).resolves.toEqual({ channelId: "ch_first", handle: "first", status: "connecting", seq: 0 });
+    await expect(secondCall).rejects.toBeInstanceOf(StreamchimeProblemError);
+    expect(receivedOrder).toEqual(["first", "second"]);
+  });
+});
+
+describe("send while disconnected", () => {
+  it("rejects subscribeTikTok and unsubscribe immediately instead of hanging (review task-14-review.md S1)", async () => {
+    const gateway = new Gateway({ apiKey: "sc_sk_test_key", gatewayUrl: "ws://127.0.0.1:1" });
+    gateways.push(gateway);
+    // connect() is never called: the gateway has no live or in-flight socket at all.
+    await expect(gateway.subscribeTikTok("samplehandle")).rejects.toThrow(/not connected/i);
+    await expect(gateway.unsubscribe("ch_sample")).rejects.toThrow(/not connected/i);
+  });
+});
+
+describe("close while disconnected", () => {
+  it("settles a pending connect() and fires disconnect when closed during the backoff gap (review task-14-review.md S2)", async () => {
+    const server = await startFakeGateway(async (socket, gw) => {
+      await gw.nextMessage(socket); // identify
+      socket.close(1012, "service_restart"); // no ready sent, so connect() is still pending
+    });
+    servers.push(server);
+
+    const gateway = new Gateway({
+      apiKey: "sc_sk_test_key",
+      gatewayUrl: server.url,
+      backoffBaseMs: 5000,
+      backoffMaxMs: 5000,
+    });
+    gateways.push(gateway);
+
+    const disconnectEvents: Array<{ code: number; reason: string }> = [];
+    gateway.on("disconnect", (payload) => disconnectEvents.push(payload));
+
+    const connectPromise = gateway.connect();
+    // Let the server's own close and the reconnect scheduling that follows it land first, so
+    // close() below runs well inside the backoff gap (no live or in-flight socket).
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    gateway.close();
+
+    await expect(connectPromise).rejects.toThrow();
+    expect(disconnectEvents.some((d) => d.code === 1000 && d.reason === "closed by client")).toBe(true);
+    expect(server.connections.length).toBe(1); // no reconnect attempt after close()
+  });
 });
 
 describe("event delivery and cursor tracking", () => {
   it("emits the envelope on event and sends the tracked cursor on the next identify", async () => {
-    let firstSocket: WsSocket;
+    // Awaited instead of a fixed sleep past the real default backoff (review task-14-review.md
+    // M4): resolves once the second connection's identify has actually been asserted, however
+    // long that reconnect really takes, rather than guessing a sleep long enough to outlast it.
+    let resolveSecondIdentifyChecked!: () => void;
+    const secondIdentifyChecked = new Promise<void>((resolve) => {
+      resolveSecondIdentifyChecked = resolve;
+    });
+
     const server = await startFakeGateway(async (socket, gw) => {
       if (gw.connections.length === 1) {
-        firstSocket = socket;
         const identify = await gw.nextMessage(socket);
         expect(identify).toEqual({ op: "identify", type: "app", token: "sc_sk_test_key" });
         send(socket, sampleReady());
@@ -199,6 +281,7 @@ describe("event delivery and cursor tracking", () => {
       const secondIdentify = await gw.nextMessage(socket);
       expect(secondIdentify).toEqual({ op: "identify", type: "app", token: "sc_sk_test_key", cursors: { ch_sample: 42 } });
       send(socket, sampleReady());
+      resolveSecondIdentifyChecked();
     });
     servers.push(server);
 
@@ -211,11 +294,121 @@ describe("event delivery and cursor tracking", () => {
     expect(envelope.channel_id).toBe("ch_sample");
     expect(envelope.payload).toEqual({ text: "sample message" });
 
-    // Wait for the reconnect's second identify to be asserted inside the connection handler
-    // above. The default backoff base is 1000ms (spec: "backoff 1, 2, 4, 8, 16 s"), plus the
-    // 50ms this test waits before closing, so this needs real headroom past 1050ms.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await secondIdentifyChecked;
     expect(server.connections.length).toBe(2);
+  });
+});
+
+describe("cursor cleanup (review task-14-review.md B2)", () => {
+  it("drops a channel's cursor once it is unsubscribed, so a reconnect does not resend it", async () => {
+    let resolveSecondIdentifyChecked!: () => void;
+    const secondIdentifyChecked = new Promise<void>((resolve) => {
+      resolveSecondIdentifyChecked = resolve;
+    });
+
+    const server = await startFakeGateway(async (socket, gw) => {
+      if (gw.connections.length === 1) {
+        await gw.nextMessage(socket); // identify
+        send(socket, sampleReady());
+        const subscribe = await gw.nextMessage(socket);
+        expect(subscribe).toEqual({ op: "subscribe", platform: "tiktok", handle: "samplehandle" });
+        send(socket, { op: "subscribed", channel_id: "ch_sample", handle: "samplehandle", status: "connecting", seq: 0 });
+        send(socket, { op: "event", seq: 42, event: sampleEnvelope({ seq: 42 }) });
+        const unsubscribe = await gw.nextMessage(socket);
+        expect(unsubscribe).toEqual({ op: "unsubscribe", channel_id: "ch_sample" });
+        send(socket, { op: "unsubscribed", channel_id: "ch_sample" });
+        setTimeout(() => socket.close(1012, "service_restart"), 50);
+        return;
+      }
+      const secondIdentify = await gw.nextMessage(socket);
+      // No "cursors" key at all: the only channel this socket ever saw an event for was
+      // unsubscribed before the reconnect, so the tracked cursor map is empty again.
+      expect(secondIdentify).toEqual({ op: "identify", type: "app", token: "sc_sk_test_key" });
+      send(socket, sampleReady());
+      resolveSecondIdentifyChecked();
+    });
+    servers.push(server);
+
+    const client = new StreamchimeClient({ apiKey: "sc_sk_test_key", gatewayUrl: server.url });
+    clients.push(client);
+    await client.connect();
+
+    const eventPromise = once(client, "event");
+    await client.subscribeTikTok("samplehandle");
+    await eventPromise; // the cursor for ch_sample is now tracked
+
+    await client.unsubscribe("ch_sample");
+
+    await secondIdentifyChecked;
+  });
+
+  it("drops a channel's cursor on a resume_gap for that channel", async () => {
+    let resolveSecondIdentifyChecked!: () => void;
+    const secondIdentifyChecked = new Promise<void>((resolve) => {
+      resolveSecondIdentifyChecked = resolve;
+    });
+
+    const server = await startFakeGateway(async (socket, gw) => {
+      if (gw.connections.length === 1) {
+        await gw.nextMessage(socket);
+        send(socket, sampleReady());
+        send(socket, { op: "event", seq: 42, event: sampleEnvelope({ seq: 42 }) });
+        send(socket, { op: "resume_gap", channel_id: "ch_sample", oldest_seq: 100 });
+        setTimeout(() => socket.close(1012, "service_restart"), 50);
+        return;
+      }
+      const secondIdentify = await gw.nextMessage(socket);
+      expect(secondIdentify).toEqual({ op: "identify", type: "app", token: "sc_sk_test_key" });
+      send(socket, sampleReady());
+      resolveSecondIdentifyChecked();
+    });
+    servers.push(server);
+
+    const client = new StreamchimeClient({ apiKey: "sc_sk_test_key", gatewayUrl: server.url });
+    clients.push(client);
+
+    const gapPromise = once(client, "resume_gap");
+    await client.connect();
+    await gapPromise;
+
+    await secondIdentifyChecked;
+  });
+
+  it("drops a channel's cursor on an unknown_channel problem for that channel, even with no pending op", async () => {
+    let resolveSecondIdentifyChecked!: () => void;
+    const secondIdentifyChecked = new Promise<void>((resolve) => {
+      resolveSecondIdentifyChecked = resolve;
+    });
+
+    const server = await startFakeGateway(async (socket, gw) => {
+      if (gw.connections.length === 1) {
+        await gw.nextMessage(socket);
+        send(socket, sampleReady());
+        send(socket, { op: "event", seq: 42, event: sampleEnvelope({ seq: 42 }) });
+        // Not an answer to any subscribe/unsubscribe call this client made; matches
+        // RoomResume.ReplayAsync (t3-app-rooms worktree) naming a stale cursor on an identify or
+        // resume the client itself did not initiate as an unsubscribe.
+        send(socket, { op: "problem", title: "unknown_channel", detail: "This channel is not one of this app's current subscriptions.", channel_id: "ch_sample" });
+        setTimeout(() => socket.close(1012, "service_restart"), 50);
+        return;
+      }
+      const secondIdentify = await gw.nextMessage(socket);
+      expect(secondIdentify).toEqual({ op: "identify", type: "app", token: "sc_sk_test_key" });
+      send(socket, sampleReady());
+      resolveSecondIdentifyChecked();
+    });
+    servers.push(server);
+
+    const client = new StreamchimeClient({ apiKey: "sc_sk_test_key", gatewayUrl: server.url });
+    clients.push(client);
+
+    const eventPromise = once(client, "event");
+    const problemPromise = once(client, "problem");
+    await client.connect();
+    await eventPromise;
+    await problemPromise;
+
+    await secondIdentifyChecked;
   });
 });
 

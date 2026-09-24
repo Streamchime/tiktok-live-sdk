@@ -39,11 +39,20 @@ describe("mapEventName", () => {
     expect(mapEventName(baseEnvelope({ type: "stream_status", payload: { live: false } }))).toBe("streamEnd");
   });
 
-  it("maps raw by subtype to join or pk, and falls back to raw otherwise", () => {
+  it("maps raw join to join, and falls back to raw for an unmapped subtype", () => {
     expect(mapEventName(baseEnvelope({ type: "raw", subtype: "join" }))).toBe("join");
-    expect(mapEventName(baseEnvelope({ type: "raw", subtype: "pk" }))).toBe("pk");
     expect(mapEventName(baseEnvelope({ type: "raw", subtype: "member_enter" }))).toBe("raw");
     expect(mapEventName(baseEnvelope({ type: "raw", subtype: null }))).toBe("raw");
+  });
+
+  // Streamchime.Rooms/Mapping/TikTokMapper.cs's MapBattle and MapArmies are the source of these
+  // three exact subtypes (streamchime-api main, read-only): pk_start and pk_end from MapBattle,
+  // pk_score from MapArmies. All three map to the single "pk" event; event.subtype carries which
+  // phase (see README).
+  it("maps every PK battle subtype to the single pk event", () => {
+    expect(mapEventName(baseEnvelope({ type: "raw", subtype: "pk_start" }))).toBe("pk");
+    expect(mapEventName(baseEnvelope({ type: "raw", subtype: "pk_score" }))).toBe("pk");
+    expect(mapEventName(baseEnvelope({ type: "raw", subtype: "pk_end" }))).toBe("pk");
   });
 
   it("falls back to raw for a schema type TikTokRoom names no event for", () => {

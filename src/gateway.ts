@@ -85,12 +85,14 @@ export interface GatewayEventMap {
   /** Not part of the SDK's documented public contract (README lists ready, event, problem,
    * resume_gap, disconnect and error only): an implementation detail TikTokRoom listens to so it
    * learns its channel id in the same synchronous pass that handled the subscribed frame, ahead
-   * of any event frame for that channel arriving right behind it. Needed because the real
-   * gateway's own AppRoomRelay.AttachAsync (t3-app-rooms worktree, HandleAppSubscribeAsync) runs
-   * before the subscribed frame is even enqueued, so a room's first events can be on the wire
-   * essentially back to back with its own subscribed confirmation; waiting for the
-   * subscribeTikTok() promise to resolve (an awaited microtask) is a tick too late to catch an
-   * event frame handled synchronously right after it in the same message batch. */
+   * of any event frame for that channel arriving right behind it in the same message batch;
+   * waiting for the subscribeTikTok() promise to resolve (an awaited microtask) is a tick too late
+   * to catch that. This closes only that client-side ordering hazard. It does not close a
+   * server-side one: HandleAppSubscribeAsync's own AttachAsync call (t3-app-rooms worktree) is not
+   * held the way the identify-time and reconnect-replay attach paths both are, so a hot room's very
+   * first live event can in principle be written to the wire before the subscribed frame itself,
+   * arriving first in wire order with no client-side fix able to catch it (review task-14-review.md
+   * S3; tracked as a cross-task flag for Task 6b's own fix round). */
   subscribed: GatewaySubscribedPayload;
 }
 
@@ -218,6 +220,15 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
     return this.enqueueOp(
       () =>
         new Promise<GatewaySubscribedPayload>((resolve, reject) => {
+          // Without this check, calling subscribeTikTok() during the gap between a close and the
+          // next successful reconnect would silently drop the frame (send() below is already a
+          // no-op then) and leave this promise pending forever: the next close would reject it,
+          // but a clean reconnect fires no further close at all. Fail fast instead (review
+          // task-14-review.md S1).
+          if (!this.isOpen()) {
+            reject(new Error("subscribeTikTok() called while the gateway is not connected"));
+            return;
+          }
           this.pendingOp = { kind: "subscribe", resolve, reject };
           this.send({ op: "subscribe", platform: "tiktok", handle });
         }),
@@ -228,6 +239,11 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
     return this.enqueueOp(
       () =>
         new Promise<void>((resolve, reject) => {
+          // See subscribeTikTok()'s own comment above (review task-14-review.md S1).
+          if (!this.isOpen()) {
+            reject(new Error("unsubscribe() called while the gateway is not connected"));
+            return;
+          }
           this.pendingOp = { kind: "unsubscribe", channelId, resolve, reject };
           this.send({ op: "unsubscribe", channel_id: channelId });
         }),
@@ -242,8 +258,32 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
     }
     this.stopPing();
     if (this.ws) {
+      // handleClose runs once this fires and settles everything below itself.
       this.ws.close(1000);
+      return;
     }
+    // No live or in-flight socket: this is a close during the backoff gap between reconnect
+    // attempts, or before connect() was ever called. handleClose will never run for this
+    // shutdown, so settle everything it would have settled the same way, rather than leaving a
+    // pending connect() or subscribeTikTok()/unsubscribe() call hanging forever and firing no
+    // "disconnect" at all (review task-14-review.md S2).
+    this.connected = false;
+    if (this.pendingOp) {
+      this.pendingOp.reject(new Error("gateway closed before answering"));
+      this.pendingOp = null;
+    }
+    const rejecters = this.connectRejecters;
+    this.connectResolvers = [];
+    this.connectRejecters = [];
+    for (const reject of rejecters) reject(new Error("gateway closed before connecting"));
+    this.emit("disconnect", { code: 1000, reason: "closed by client" });
+  }
+
+  /** True once the WebSocket handshake has completed and this Gateway can send a frame; false
+   * during the identify window's own connecting state, the gap between a close and the next
+   * reconnect attempt, and after close(). */
+  private isOpen(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
   /** Subscribe and unsubscribe share one FIFO: the gateway (like the server's own receive loop)
@@ -297,10 +337,11 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
   }
 
   private send(frame: Record<string, unknown>): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    this.ws.send(JSON.stringify(frame));
+    ws.send(JSON.stringify(frame));
   }
 
   private handleMessage(data: WebSocket.RawData): void {
@@ -324,12 +365,17 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
       case "unsubscribed":
         this.handleUnsubscribed();
         break;
-      case "resume_gap":
-        this.emit("resume_gap", {
-          channelId: frame.channel_id as string,
-          oldestSeq: frame.oldest_seq as number,
-        });
+      case "resume_gap": {
+        const channelId = frame.channel_id as string;
+        // The tracked cursor for this channel is now permanently behind what the server can
+        // still replay; keeping it around would only earn the same resume_gap again on every
+        // future reconnect until a fresh event overwrites it. Dropped before emitting, so a
+        // listener reading the gateway's own cursor state (none does today, but the ordering is
+        // the safer default) never observes the doomed value (review task-14-review.md B2).
+        this.cursors.delete(channelId);
+        this.emit("resume_gap", { channelId, oldestSeq: frame.oldest_seq as number });
         break;
+      }
       case "problem":
         this.handleProblem(frame);
         break;
@@ -337,9 +383,12 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
         this.emit("error", new Error(`gateway error ${frame.code as string}: ${frame.message as string}`));
         break;
       default:
-        // pong, settings and channels are first-party only; any op this build does not know yet
-        // is ignored rather than treated as fatal, the same forward tolerance the schema itself
-        // asks for ("additive versioning: unknown keys are allowed").
+        // settings and channels are first-party only; pong is sent to every principal but carries
+        // no useful seq for an app (GatewayEndpoint.cs's PongSeqAsync answers 0 for one outright,
+        // no Redis read at all), so there is nothing for this client to do with it. Any op this
+        // build does not know yet is ignored the same way, rather than treated as fatal, the same
+        // forward tolerance the schema itself asks for ("additive versioning: unknown keys are
+        // allowed").
         break;
     }
   }
@@ -412,6 +461,12 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
 
   private handleUnsubscribed(): void {
     if (this.pendingOp?.kind === "unsubscribe") {
+      // Drop the cursor now that the channel is gone: otherwise a long-lived app that churns
+      // through handles (Task 15's own harness usage) keeps resending a stale cursor for a
+      // channel it is no longer subscribed to on every future identify, which both grows the
+      // frame forever and earns an unknown_channel problem back on every single reconnect
+      // (review task-14-review.md B2).
+      this.cursors.delete(this.pendingOp.channelId);
       this.pendingOp.resolve();
       this.pendingOp = null;
     }
@@ -423,6 +478,18 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
       detail: frame.detail as string,
       channelId: (frame.channel_id as string | null | undefined) ?? null,
     };
+
+    // unknown_channel names a channel this app no longer holds, whether this problem answered an
+    // unsubscribe call for an already-gone channel or a stale cursor on identify/resume
+    // (RoomResume.ReplayAsync, t3-app-rooms worktree): either way the tracked cursor for it is
+    // now useless and, left in place, would keep answering unknown_channel again on every future
+    // reconnect. Dropped unconditionally on the channel id, not only when it happens to match the
+    // pendingOp below, so this also self-heals a subscription that went away for a reason other
+    // than this client's own unsubscribe() call (review task-14-review.md B2).
+    if (payload.title === "unknown_channel" && payload.channelId) {
+      this.cursors.delete(payload.channelId);
+    }
+
     this.emit("problem", payload);
 
     if (!this.pendingOp) {
