@@ -1,0 +1,67 @@
+{
+  "name": "@streamchime/tiktok-live-sdk",
+  "version": "0.1.0",
+  "description": "Streamchime SDK for TikTok LIVE. Not affiliated with TikTok.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./schema/event.v1.schema.json": "./schema/event.v1.schema.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "schema",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Streamchime/tiktok-live-sdk.git"
+  },
+  "homepage": "https://streamchime.com",
+  "bugs": {
+    "url": "https://github.com/Streamchime/tiktok-live-sdk/issues"
+  },
+  "keywords": [
+    "streamchime",
+    "tiktok",
+    "tiktok-live",
+    "websocket",
+    "sdk"
+  ],
+  "scripts": {
+    "build:types": "node scripts/types.mjs",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "json-schema-to-typescript": "^15.0.3",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.1"
+  }
+}

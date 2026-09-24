@@ -1,0 +1,550 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "Event",
+  "type": "object",
+  "description": "Streamchime event envelope v1 (MIT). snake_case wire format. Additive versioning: unknown keys are allowed.",
+  "required": [
+    "v",
+    "id",
+    "seq",
+    "platform",
+    "channel_id",
+    "type",
+    "occurred_at",
+    "received_at",
+    "payload",
+    "platform_ids",
+    "test"
+  ],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "format": "int32"
+    },
+    "id": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "platform": {
+      "$ref": "#/definitions/Platform"
+    },
+    "channel_id": {
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/definitions/EventType"
+    },
+    "subtype": {
+      "type": [
+        "null",
+        "string"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/definitions/Actor"
+        }
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "description": "One of the payload definitions, selected by type (and subtype)."
+    },
+    "platform_ids": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "test": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "Platform": {
+      "type": "string",
+      "description": "",
+      "x-enumNames": [
+        "Twitch",
+        "Kick",
+        "Youtube",
+        "Tiktok",
+        "Bagibagi"
+      ],
+      "enum": [
+        "twitch",
+        "kick",
+        "youtube",
+        "tiktok",
+        "bagibagi"
+      ]
+    },
+    "EventType": {
+      "type": "string",
+      "description": "",
+      "x-enumNames": [
+        "Message",
+        "Gift",
+        "Tip",
+        "Cheer",
+        "Subscription",
+        "GiftSubscription",
+        "Follow",
+        "Raid",
+        "Like",
+        "Share",
+        "ViewerCount",
+        "StreamStatus",
+        "Redemption",
+        "Raw"
+      ],
+      "enum": [
+        "message",
+        "gift",
+        "tip",
+        "cheer",
+        "subscription",
+        "gift_subscription",
+        "follow",
+        "raid",
+        "like",
+        "share",
+        "viewer_count",
+        "stream_status",
+        "redemption",
+        "raw"
+      ]
+    },
+    "Actor": {
+      "type": "object",
+      "required": [
+        "badges",
+        "anonymous"
+      ],
+      "properties": {
+        "platform_user_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "username": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "display_name": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "avatar_url": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "badges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "anonymous": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Money": {
+      "type": "object",
+      "required": [
+        "amount",
+        "estimate"
+      ],
+      "properties": {
+        "amount": {
+          "type": "number",
+          "format": "decimal"
+        },
+        "currency": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "unit": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "usd_estimate": {
+          "type": [
+            "null",
+            "number"
+          ],
+          "format": "decimal"
+        },
+        "estimate": {
+          "type": "boolean"
+        }
+      }
+    },
+    "GiftPayload": {
+      "type": "object",
+      "required": [
+        "gift_id",
+        "gift_name",
+        "count",
+        "streak_final",
+        "money"
+      ],
+      "properties": {
+        "gift_id": {
+          "type": "string"
+        },
+        "gift_name": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "streak_final": {
+          "type": "boolean"
+        },
+        "money": {
+          "$ref": "#/definitions/Money"
+        },
+        "message": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "image_url": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "pinned_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      }
+    },
+    "MessagePayload": {
+      "type": "object",
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "reply_to_message_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "bits": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      }
+    },
+    "TipPayload": {
+      "type": "object",
+      "required": [
+        "money"
+      ],
+      "properties": {
+        "money": {
+          "$ref": "#/definitions/Money"
+        },
+        "message": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "tier": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "sticker_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      }
+    },
+    "CheerPayload": {
+      "type": "object",
+      "required": [
+        "message",
+        "money"
+      ],
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "money": {
+          "$ref": "#/definitions/Money"
+        }
+      }
+    },
+    "SubscriptionPayload": {
+      "type": "object",
+      "required": [
+        "tier",
+        "is_gift"
+      ],
+      "properties": {
+        "tier": {
+          "type": "string"
+        },
+        "is_gift": {
+          "type": "boolean"
+        },
+        "tier_name": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "months": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "cumulative_months": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "message": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      }
+    },
+    "GiftSubscriptionPayload": {
+      "type": "object",
+      "required": [
+        "count",
+        "tier"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "tier": {
+          "type": "string"
+        },
+        "tier_name": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "recipients": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "cumulative_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      }
+    },
+    "FollowPayload": {
+      "type": "object",
+      "properties": {
+        "is_repeat": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "RaidPayload": {
+      "type": "object",
+      "required": [
+        "viewer_count",
+        "from"
+      ],
+      "properties": {
+        "viewer_count": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "from": {
+          "$ref": "#/definitions/RaidFrom"
+        }
+      }
+    },
+    "RaidFrom": {
+      "type": "object",
+      "required": [
+        "platform_user_id",
+        "display_name"
+      ],
+      "properties": {
+        "platform_user_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        }
+      }
+    },
+    "LikePayload": {
+      "type": "object",
+      "required": [
+        "count",
+        "total"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "total": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "SharePayload": {
+      "type": "object"
+    },
+    "ViewerCountPayload": {
+      "type": "object",
+      "required": [
+        "count"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
+    "StreamStatusPayload": {
+      "type": "object",
+      "required": [
+        "live"
+      ],
+      "properties": {
+        "live": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "category": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "started_at": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "RedemptionPayload": {
+      "type": "object",
+      "required": [
+        "reward_id",
+        "reward_name",
+        "status"
+      ],
+      "properties": {
+        "reward_id": {
+          "type": "string"
+        },
+        "reward_name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "cost": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "input": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      }
+    }
+  },
+  "$id": "https://streamchime.com/schema/event.v1.schema.json"
+}
