@@ -125,12 +125,15 @@ catalogue fetched yet).
 
 ## Reconnection
 
-The client reconnects on any gateway close except `4001` (the key is wrong or revoked; retrying
-would only fail the same way), with backoff starting at 1 second and doubling up to a 60 second
-cap: 1, 2, 4, 8, 16, 32, 60 seconds. Every subscribed channel's last delivered position is sent
-back on the next identify, so a reconnect resumes from where it left off; if the gap is too old
-for the server to replay, a `resume_gap` event names the channel and the oldest position it can
-still replay from. The client sends a ping every 25 seconds to keep the connection alive.
+The client reconnects on any gateway close except `4001` (the key is wrong or revoked) and `1009`
+(the identify frame itself was too large for the gateway, a standard WebSocket close the gateway
+sends when a client frame is over its size bound): retrying either would only fail the same way,
+so both instead surface as an `error` event and reject a `connect()` still waiting on its first
+ready. Every other close reconnects with backoff starting at 1 second and doubling up to a 60
+second cap: 1, 2, 4, 8, 16, 32, 60 seconds. Every subscribed channel's last delivered position is
+sent back on the next identify, so a reconnect resumes from where it left off; if the gap is too
+old for the server to replay, a `resume_gap` event names the channel and the oldest position it
+can still replay from. The client sends a ping every 25 seconds to keep the connection alive.
 
 ## Caps by tier
 

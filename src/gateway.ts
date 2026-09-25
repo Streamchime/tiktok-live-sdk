@@ -154,6 +154,14 @@ const DEFAULT_BACKOFF_MAX_MS = 60000;
  * section 7, Gateway/GatewayClose.cs's GatewayClose.Unauthorized). */
 const UNAUTHORIZED_CLOSE_CODE = 4001;
 
+/** The standard WebSocket "message too big" close code (RFC 6455). The gateway closes with this,
+ * reason "frame_too_large", when a client frame is over its size bound (GatewayOptions
+ * .ClientFrameMaxBytes, 4 KB); in practice the only frame this SDK sends whose size varies at all
+ * is identify, grown past the bound by its own cursors object. Reconnecting would resend that
+ * very same identify with that very same cursor count and hit the same close again, so this is
+ * terminal exactly like 4001, not scheduled for another attempt. */
+const FRAME_TOO_LARGE_CLOSE_CODE = 1009;
+
 /** The problem titles that answer a subscribe request (Shared names, "Client ops (app sessions
  * only)" and the t3-app-rooms worktree's HandleAppSubscribeAsync): each one is sent instead of a
  * subscribed frame, in place of it, so it rejects the same pending promise a subscribed frame
@@ -524,15 +532,31 @@ export class Gateway extends TypedEmitter<GatewayEventMap> {
     }
 
     if (code === UNAUTHORIZED_CLOSE_CODE) {
-      const error = new Error("gateway refused the identify: 4001 unauthorized");
-      const rejecters = this.connectRejecters;
-      this.connectResolvers = [];
-      this.connectRejecters = [];
-      for (const reject of rejecters) reject(error);
+      this.rejectConnect(new Error("gateway refused the identify: 4001 unauthorized"));
+      return;
+    }
+
+    if (code === FRAME_TOO_LARGE_CLOSE_CODE) {
+      const count = this.cursors.size;
+      const error = new Error(
+        `the identify frame was too large for the gateway (${count} cursor${count === 1 ? "" : "s"} tracked)`,
+      );
+      this.emit("error", error);
+      this.rejectConnect(error);
       return;
     }
 
     this.scheduleReconnect();
+  }
+
+  /** Settles any connect() call still waiting on a first ready frame, with the given error, and
+   * clears the arrays so a later close does not resolve or reject them again. Shared by every
+   * terminal close code (4001, 1009): none of them will ever get an answer by trying again. */
+  private rejectConnect(error: Error): void {
+    const rejecters = this.connectRejecters;
+    this.connectResolvers = [];
+    this.connectRejecters = [];
+    for (const reject of rejecters) reject(error);
   }
 
   private scheduleReconnect(): void {

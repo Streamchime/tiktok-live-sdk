@@ -449,6 +449,49 @@ describe("4001 stops reconnection", () => {
   });
 });
 
+describe("1009 stops reconnection", () => {
+  it("does not reconnect after frame_too_large and surfaces an error naming the tracked cursor count", async () => {
+    const server = await startFakeGateway(async (socket, gw) => {
+      if (gw.connections.length === 1) {
+        await gw.nextMessage(socket); // identify
+        send(socket, sampleReady());
+        send(socket, { op: "event", seq: 42, event: sampleEnvelope({ seq: 42 }) });
+        // Close for something other than 4001/1009 so the client reconnects and resends
+        // identify, this time carrying the cursor the event above left behind.
+        setTimeout(() => socket.close(1012, "service_restart"), 30);
+        return;
+      }
+      // The second identify, now with one tracked cursor, is what the gateway rejects as too
+      // large (standard WebSocket 1009, reason frame_too_large).
+      await gw.nextMessage(socket);
+      socket.close(1009, "frame_too_large");
+    });
+    servers.push(server);
+
+    const gateway = new Gateway({
+      apiKey: "sc_sk_test_key",
+      gatewayUrl: server.url,
+      backoffBaseMs: 20,
+      backoffMaxMs: 200,
+      pingIntervalMs: 60000,
+    });
+    gateways.push(gateway);
+
+    const errorPromise = once<Error>(gateway, "error");
+    const eventPromise = once(gateway, "event");
+    await gateway.connect();
+    await eventPromise; // one cursor (ch_sample) is now tracked
+
+    const error = await errorPromise;
+    expect(error.message).toMatch(/identify frame was too large for the gateway/i);
+    expect(error.message).toMatch(/1 cursor\b/);
+
+    // No third connection attempt after the terminal close.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(server.connections.length).toBe(2);
+  });
+});
+
 describe("backoff", () => {
   it("doubles from the base delay and caps at the max", () => {
     expect(nextBackoffDelay(0, 1000, 60000)).toBe(1000);
