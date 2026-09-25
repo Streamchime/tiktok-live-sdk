@@ -50,6 +50,7 @@
   "scripts": {
     "build:types": "node scripts/types.mjs",
     "build": "tsup",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
